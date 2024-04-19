@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/jackc/pgx/v4/pgxpool"
@@ -66,9 +67,9 @@ var commands = []*discordgo.ApplicationCommand{
 		Description: "Shows the unholy messages of a given user",
 		Options: []*discordgo.ApplicationCommandOption{
 			{
-				Type:        discordgo.ApplicationCommandOptionString,
-				Name:        "word",
-				Description: "word to be added",
+				Type:        discordgo.ApplicationCommandOptionUser,
+				Name:        "user",
+				Description: "Select the user you want to lookup",
 				Required:    true,
 			},
 		},
@@ -85,6 +86,18 @@ var commands = []*discordgo.ApplicationCommand{
 			},
 		},
 	},
+	{
+		Name:        "unholyremove",
+		Description: "removees a word to the DB",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "word",
+				Description: "The word to be removed",
+				Required:    true,
+			},
+		},
+	},
 	// her kan neste komando være
 }
 
@@ -92,9 +105,52 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 	"unholy": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		user := i.ApplicationCommandData().Options[0].UserValue(s)
 
-		response := user.ID // her skal logiken være for å sende spørring til db og der input er brukeren og response skal være det som kommer i disc
+		// Construct the query to fetch messages
+		query := `SELECT Message, ServerID, Timestamp FROM messages WHERE UserID = $1;`
+		rows, err := dbpool.Query(context.Background(), query, user.ID)
+		if err != nil {
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: fmt.Sprintf("Failed to query database: %v", err),
+				},
+			})
+			return
+		}
+		defer rows.Close()
 
-		//user.ID gir iden til brukeren (for databasen) bare user gir discord tagen.
+		var messages []string
+		for rows.Next() {
+			var message, serverID string
+			var timestamp time.Time
+			if err := rows.Scan(&message, &serverID, &timestamp); err != nil {
+				continue
+			}
+
+			guild, err := s.Guild(serverID)
+			if err != nil {
+				continue
+			}
+			guildName := guild.Name
+
+			messageStr := fmt.Sprintf("%s: %s: **%s**: %s", guildName, user.String(), message, timestamp.Format("2006-01-02 15:04:05"))
+			messages = append(messages, messageStr)
+		}
+
+		if err := rows.Err(); err != nil {
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: fmt.Sprintf("Error processing results: %v", err),
+				},
+			})
+			return
+		}
+
+		response := strings.Join(messages, "\n")
+		if response == "" {
+			response = "No messages found for the user."
+		}
 
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -103,6 +159,7 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			},
 		})
 	},
+
 	"unholyadd": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		adminUserID := os.Getenv("ADMIN_ID")
 		response := "Skill issue"
@@ -137,6 +194,49 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			response = fmt.Sprintf("Word '%s' already exists in the database.", word)
 		} else {
 			response = fmt.Sprintf("Word '%s' added successfully.", word)
+		}
+
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: response,
+			},
+		})
+	},
+	"unholyremove": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		adminUserID := os.Getenv("ADMIN_ID")
+		response := "Skill issue"
+
+		if i.Member.User.ID != adminUserID {
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: response,
+				},
+			})
+			return
+		}
+
+		word := i.ApplicationCommandData().Options[0].StringValue()
+
+		query := `DELETE FROM words WHERE word = $1;`
+		commandTag, err := dbpool.Exec(context.Background(), query, word)
+
+		if err != nil {
+			response := fmt.Sprintf("Failed to remove word: %v", err)
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: response,
+				},
+			})
+			return
+		}
+
+		if commandTag.RowsAffected() == 0 {
+			response = fmt.Sprintf("Word '%s' does not exists in the database.", word)
+		} else {
+			response = fmt.Sprintf("Word '%s' removed successfully.", word)
 		}
 
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -271,15 +371,16 @@ CREATE TABLE words (
     word VARCHAR(255) UNIQUE
 );
 
-
 CREATE TABLE messages (
+    messageID UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     UserID varchar(255),
     Timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     Message TEXT,
     ServerID varchar(255),
     wordID UUID,
-    FOREIGN KEY (wordID) REFERENCES words(wordID)
+    FOREIGN KEY (wordID) REFERENCES words(wordID) ON DELETE CASCADE
 );
+
 
 */
 
