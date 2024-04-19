@@ -15,10 +15,9 @@ import (
 )
 
 type Message struct {
-	UserID    string
-	ServerID  string
+	UserID    int
+	ServerID  int
 	Content   string
-	Timestamp string
 }
 
 var GuildID = flag.String("guild", "", "Test guild ID. If not passed - bot registers commands globally")
@@ -160,8 +159,9 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		UserID:    m.Author.ID,
 		ServerID:  m.GuildID,
 		Content:   m.Content,
-		Timestamp: m.Timestamp.Format(time.RFC3339),
 	}
+
+	
 
 	if err := insertMessage(msg); err != nil {
 		log.Printf("Failed to insert message: %v", err)
@@ -180,36 +180,23 @@ func insertMessage(msg Message) error {
 
 /**
 
--- Users Table Creation
-CREATE TABLE IF NOT EXISTS Users (
-    UserID VARCHAR(255) PRIMARY KEY
-    -- Add other user attributes here if necessary, such as username, discriminator, etc.
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+
+CREATE TABLE words (
+    wordID UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    word VARCHAR(255)
 );
 
--- Servers Table Creation
-CREATE TABLE IF NOT EXISTS Servers (
-    ServerID VARCHAR(255) PRIMARY KEY,
-    ServerName TEXT NOT NULL
+
+CREATE TABLE messages (
+    UserID INT,
+    Timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    Message TEXT,
+    ServerID INT,
+    wordID UUID,
+    FOREIGN KEY (wordID) REFERENCES words(wordID)
 );
-
--- Messages Table Creation
-CREATE TABLE IF NOT EXISTS Messages (
-    MessageID BIGSERIAL PRIMARY KEY,
-    UserID VARCHAR(255) NOT NULL REFERENCES Users(UserID),
-    ServerID VARCHAR(255) NOT NULL REFERENCES Servers(ServerID),
-    Content TEXT NOT NULL,
-    Timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Index for querying by UserID on the Messages Table
-CREATE INDEX IF NOT EXISTS idx_messages_userid ON Messages(UserID);
-
--- Index for querying by ServerID on the Messages Table
-CREATE INDEX IF NOT EXISTS idx_messages_serverid ON Messages(ServerID);
-
--- Index for querying by Timestamp on the Messages Table
-CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON Messages(Timestamp);
-
 
 */
 
@@ -252,3 +239,5 @@ CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON Messages(Timestamp);
 
 
 */
+
+
