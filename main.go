@@ -212,3 +212,43 @@ CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON Messages(Timestamp);
 
 
 */
+
+/**
+
+	// Fetch unsername form ID
+	 user, err := dg.User(userID)
+    if err != nil {
+        fmt.Println("Failed to get user:", err)
+    } else {
+        fmt.Println("Username:", user.Username)
+    }
+
+    // Fetch guild name
+    guild, err := dg.Guild(guildID)
+    if err != nil {
+        fmt.Println("Failed to get guild:", err)
+    } else {
+        fmt.Println("Guild Name:", guild.Name)
+    }
+
+
+
+
+	uuID for ID imellom ord og innlegg - defoult newid()
+
+	
+	auto timestamp - defoult UNIX timestamp
+
+	 unixTimestamp := int64(1617183600) // You can replace this with any Unix timestamp
+
+    // Convert Unix timestamp to time.Time
+    tm := time.Unix(unixTimestamp, 0)
+
+    // Format time as string "YYYY-MM-DD HH:MM:SS"
+    formattedTime := tm.Format("2006-01-02 15:04:05")
+
+    // Print formatted time
+    fmt.Println("Formatted Time:", formattedTime)
+
+
+*/
