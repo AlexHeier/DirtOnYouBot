@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"time"
+	"strings"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/jackc/pgx/v4/pgxpool"
@@ -15,9 +15,9 @@ import (
 )
 
 type Message struct {
-	UserID    int
-	ServerID  int
-	Content   string
+	UserID   int
+	ServerID int
+	Content  string
 }
 
 var GuildID = flag.String("guild", "", "Test guild ID. If not passed - bot registers commands globally")
@@ -66,13 +66,26 @@ var commands = []*discordgo.ApplicationCommand{
 		Description: "Shows the unholy messages of a given user",
 		Options: []*discordgo.ApplicationCommandOption{
 			{
-				Type:        discordgo.ApplicationCommandOptionUser,
-				Name:        "user",
-				Description: "users messages",
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "word",
+				Description: "word to be added",
 				Required:    true,
 			},
 		},
-	}, // her kan neste komando være
+	},
+	{
+		Name:        "unholyadd",
+		Description: "Adds a word to the DB",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "word",
+				Description: "The word to be added",
+				Required:    true,
+			},
+		},
+	},
+	// her kan neste komando være
 }
 
 var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.InteractionCreate){
@@ -89,7 +102,52 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 				Content: response,
 			},
 		})
-	}, // her kan neste comando være
+	},
+	"unholyadd": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		adminUserID := os.Getenv("ADMIN_ID")
+		response := "Skill issue"
+
+		if i.Member.User.ID != adminUserID {
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: response,
+				},
+			})
+			return
+		}
+
+		word := i.ApplicationCommandData().Options[0].StringValue()
+
+		query := `INSERT INTO words (word) VALUES ($1) ON CONFLICT (word) DO NOTHING;`
+		commandTag, err := dbpool.Exec(context.Background(), query, word)
+
+		if err != nil {
+			response := fmt.Sprintf("Failed to add word: %v", err)
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: response,
+				},
+			})
+			return
+		}
+
+		if commandTag.RowsAffected() == 0 {
+			response = fmt.Sprintf("Word '%s' already exists in the database.", word)
+		} else {
+			response = fmt.Sprintf("Word '%s' added successfully.", word)
+		}
+
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: response,
+			},
+		})
+	},
+
+	// her kan neste comando være
 }
 
 func init() {
@@ -155,27 +213,52 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
-	msg := Message{
-		UserID:    m.Author.ID,
-		ServerID:  m.GuildID,
-		Content:   m.Content,
+	wordsInMessage := strings.Fields(strings.ToLower(m.Content))
+
+	wordsQuery := `SELECT wordID, word FROM words;`
+	rows, err := dbpool.Query(context.Background(), wordsQuery)
+	if err != nil {
+		log.Printf("Error querying the datebase: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	wordIDs := []string{}
+
+	for rows.Next() {
+		var (
+			wordID string
+			word   string
+		)
+
+		if err := rows.Scan(&wordID, &word); err != nil {
+			log.Printf("error scanning rows: %v", err)
+			return
+		}
+
+		for _, w := range wordsInMessage {
+			if w == word {
+				wordIDs = append(wordIDs, wordID)
+			}
+		}
 	}
 
-	
-
-	if err := insertMessage(msg); err != nil {
-		log.Printf("Failed to insert message: %v", err)
-	} else {
-		log.Println("Message logged successfully")
+	if err := rows.Err(); err != nil {
+		log.Println("error iterating rows: %w", err)
+		return
 	}
-}
 
-func insertMessage(msg Message) error {
-	ctx := context.Background()
-	sql := `INSERT INTO Messages (UserID, ServerID, Content, Timestamp) VALUES ($1, $2, $3, $4)`
+	if len(wordIDs) == 0 {
+		return
+	}
 
-	_, err := dbpool.Exec(ctx, sql, msg.UserID, msg.ServerID, msg.Content, msg.Timestamp)
-	return err
+	insertQuery := `INSERT INTO messages (UserID, Message, ServerID, wordID) VALUES ($1, $2, $3, $4);`
+	_, err = dbpool.Exec(context.Background(), insertQuery, m.Author.ID, m.Content, m.GuildID, wordIDs[0])
+	if err != nil {
+		log.Printf("Error inserting message into database: %v", err)
+		return
+	}
+
 }
 
 /**
@@ -185,15 +268,15 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 CREATE TABLE words (
     wordID UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    word VARCHAR(255)
+    word VARCHAR(255) UNIQUE
 );
 
 
 CREATE TABLE messages (
-    UserID INT,
+    UserID varchar(255),
     Timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     Message TEXT,
-    ServerID INT,
+    ServerID varchar(255),
     wordID UUID,
     FOREIGN KEY (wordID) REFERENCES words(wordID)
 );
@@ -223,7 +306,7 @@ CREATE TABLE messages (
 
 	uuID for ID imellom ord og innlegg - defoult newid()
 
-	
+
 	auto timestamp - defoult UNIX timestamp
 
 	 unixTimestamp := int64(1617183600) // You can replace this with any Unix timestamp
@@ -239,7 +322,3 @@ CREATE TABLE messages (
 
 
 */
-
-// test
-
-
