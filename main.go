@@ -21,6 +21,12 @@ type Message struct {
 	Content  string
 }
 
+type userScore struct {
+	UserID       string
+	MessageCount int
+	Username     string
+}
+
 var GuildID = flag.String("guild", "", "Test guild ID. If not passed - bot registers commands globally")
 var RemoveCommands = flag.Bool("rmcmd", true, "Remove all commands after shutdowning or not")
 var s *discordgo.Session
@@ -98,23 +104,32 @@ var commands = []*discordgo.ApplicationCommand{
 			},
 		},
 	},
+	{
+		Name:        "scoreboard",
+		Description: "shows who has the most enterys in the DB",
+	},
+	{
+		Name:        "words",
+		Description: "shows all the words in the DB",
+	},
+	{
+		Name:        "commonwords",
+		Description: "shows which words has been used to most",
+	},
 	// her kan neste komando være
 }
 
 var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.InteractionCreate){
 	"unholy": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		user := i.ApplicationCommandData().Options[0].UserValue(s)
+		var response string
 
 		// Construct the query to fetch messages
 		query := `SELECT Message, ServerID, Timestamp FROM messages WHERE UserID = $1;`
 		rows, err := dbpool.Query(context.Background(), query, user.ID)
 		if err != nil {
-			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Content: fmt.Sprintf("Failed to query database: %v", err),
-				},
-			})
+			response = fmt.Sprintf("Failed to query database: %v", err)
+			sendResponse(s, i, response)
 			return
 		}
 		defer rows.Close()
@@ -138,26 +153,18 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 		}
 
 		if err := rows.Err(); err != nil {
-			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Content: fmt.Sprintf("Error processing results: %v", err),
-				},
-			})
+			log.Printf("Error processing results: %v", err)
+			response = fmt.Sprintf("Error processing results: %v", err)
+			sendResponse(s, i, response)
 			return
 		}
 
-		response := strings.Join(messages, "\n")
+		response = strings.Join(messages, "\n")
 		if response == "" {
 			response = "No messages found for the user."
 		}
 
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: response,
-			},
-		})
+		sendResponse(s, i, response)
 	},
 
 	"unholyadd": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -165,12 +172,7 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 		response := "Skill issue"
 
 		if i.Member.User.ID != adminUserID {
-			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Content: response,
-				},
-			})
+			sendResponse(s, i, response)
 			return
 		}
 
@@ -181,12 +183,7 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 
 		if err != nil {
 			response := fmt.Sprintf("Failed to add word: %v", err)
-			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Content: response,
-				},
-			})
+			sendResponse(s, i, response)
 			return
 		}
 
@@ -196,24 +193,14 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			response = fmt.Sprintf("Word '%s' added successfully.", word)
 		}
 
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: response,
-			},
-		})
+		sendResponse(s, i, response)
 	},
 	"unholyremove": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		adminUserID := os.Getenv("ADMIN_ID")
 		response := "Skill issue"
 
 		if i.Member.User.ID != adminUserID {
-			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Content: response,
-				},
-			})
+			sendResponse(s, i, response)
 			return
 		}
 
@@ -224,12 +211,7 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 
 		if err != nil {
 			response := fmt.Sprintf("Failed to remove word: %v", err)
-			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Content: response,
-				},
-			})
+			sendResponse(s, i, response)
 			return
 		}
 
@@ -239,15 +221,182 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			response = fmt.Sprintf("Word '%s' removed successfully.", word)
 		}
 
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: response,
-			},
-		})
+		sendResponse(s, i, response)
+	},
+	"scoreboard": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		query := `SELECT UserID, COUNT(*) AS message_count FROM messages GROUP BY UserID ORDER BY message_count DESC;`
+		rows, err := dbpool.Query(ctx, query)
+		if err != nil {
+			log.Printf("Error executing scoreboard query: %v", err)
+			sendResponse(s, i, "Failed to fetch scoreboard.")
+			return
+		}
+		defer rows.Close()
+
+		var scores []userScore // userScore defined in previous response
+
+		for rows.Next() {
+			var us userScore
+			if err := rows.Scan(&us.UserID, &us.MessageCount); err != nil {
+				log.Printf("Error scanning scoreboard row: %v", err)
+				continue
+			}
+			scores = append(scores, us)
+		}
+
+		if err := rows.Err(); err != nil {
+			log.Printf("Error processing scoreboard results: %v", err)
+			sendResponse(s, i, "Error processing scoreboard results.")
+			return
+		}
+
+		// Fetch usernames for each user ID
+		for index, score := range scores {
+			user, err := s.User(score.UserID)
+			if err != nil {
+				log.Printf("Error fetching user %s: %v", score.UserID, err)
+				scores[index].Username = "Unknown User"
+			} else {
+				scores[index].Username = user.Username
+			}
+		}
+
+		embed := &discordgo.MessageEmbed{
+			Title:       "Scoreboard",
+			Description: "Top message counts:",
+			Color:       0x00ff00, // Green color
+			Fields:      make([]*discordgo.MessageEmbedField, 0),
+			Timestamp:   time.Now().Format(time.RFC3339),
+		}
+
+		// Add special fields for the top three
+		for i, score := range scores[:3] {
+			icon := ""
+			switch i {
+			case 0:
+				icon = "🥇" // Gold medal emoji
+			case 1:
+				icon = "🥈" // Silver medal emoji
+			case 2:
+				icon = "🥉" // Bronze medal emoji
+			}
+			field := &discordgo.MessageEmbedField{
+				Name:   fmt.Sprintf("%s %s", icon, score.Username),
+				Value:  fmt.Sprintf("%d entries", score.MessageCount),
+				Inline: false,
+			}
+			embed.Fields = append(embed.Fields, field)
+		}
+
+		// Add fields for the rest
+		if len(scores) > 3 {
+			embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+				Name:   "More results",
+				Value:  "-------------------------",
+				Inline: false,
+			})
+			for _, score := range scores[3:] {
+				field := &discordgo.MessageEmbedField{
+					Name:   score.Username,
+					Value:  fmt.Sprintf("%d entries", score.MessageCount),
+					Inline: false,
+				}
+				embed.Fields = append(embed.Fields, field)
+			}
+		}
+
+		sendEmbedResponse(s, i, embed)
 	},
 
-	// her kan neste comando være
+	"words": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+
+		var response string
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		rows, err := dbpool.Query(ctx, "SELECT word FROM words")
+		if err != nil {
+			log.Printf("Error executing query: %v", err)
+			response := "Error fetching words."
+			sendResponse(s, i, response)
+			return
+		}
+		defer rows.Close()
+
+		var words []string
+		for rows.Next() {
+			var word string
+			if err := rows.Scan(&word); err != nil {
+				log.Printf("Error scanning row: %v", err)
+				continue
+			}
+			words = append(words, word)
+		}
+
+		if err := rows.Err(); err != nil {
+			log.Printf("Error during row iteration: %v", err)
+			response := "Error processing words."
+			sendResponse(s, i, response)
+			return
+		}
+
+		if len(words) == 0 {
+			response = "No words found."
+		} else {
+			response = "Words: " + strings.Join(words, ", ")
+		}
+		sendResponse(s, i, response)
+	},
+	"commonwords": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// SQL query to count each word's occurrences and order by count
+		query := `
+			SELECT w.word, COUNT(*) AS usage_count
+			FROM words w
+			JOIN messages m ON w.wordID = m.wordID
+			GROUP BY w.word
+			ORDER BY usage_count DESC;
+		`
+		rows, err := dbpool.Query(ctx, query)
+		if err != nil {
+			log.Printf("Error executing commonwords query: %v", err)
+			sendResponse(s, i, "Failed to fetch common words.")
+			return
+		}
+		defer rows.Close()
+
+		var results []string
+		for rows.Next() {
+			var word string
+			var count int
+			if err := rows.Scan(&word, &count); err != nil {
+				log.Printf("Error scanning row: %v", err)
+				continue
+			}
+			results = append(results, fmt.Sprintf("%s: %d", word, count))
+		}
+
+		if err := rows.Err(); err != nil {
+			log.Printf("Error processing common words results: %v", err)
+			sendResponse(s, i, "Error processing common words results.")
+			return
+		}
+
+		if len(results) == 0 {
+			sendResponse(s, i, "No words have been recorded yet.")
+		} else {
+			response := "Common Words Usage:\n" + strings.Join(results, "\n")
+			sendResponse(s, i, response)
+		}
+	},
+
+	// her kan neste commando være
 }
 
 func init() {
@@ -309,21 +458,23 @@ func main() {
 }
 
 func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if m.Author.ID == s.State.User.ID {
+	if m.Author.ID == s.State.User.ID { // Skip messages from the bot itself
 		return
 	}
 
 	wordsInMessage := strings.Fields(strings.ToLower(m.Content))
 
+	// Fetch all words and their IDs from the database
 	wordsQuery := `SELECT wordID, word FROM words;`
 	rows, err := dbpool.Query(context.Background(), wordsQuery)
 	if err != nil {
-		log.Printf("Error querying the datebase: %v", err)
+		log.Printf("Error querying the database: %v", err)
 		return
 	}
 	defer rows.Close()
 
 	wordIDs := []string{}
+	wordMap := make(map[string]string) // Map to store word to wordID mapping
 
 	for rows.Next() {
 		var (
@@ -332,33 +483,74 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		)
 
 		if err := rows.Scan(&wordID, &word); err != nil {
-			log.Printf("error scanning rows: %v", err)
+			log.Printf("Error scanning rows: %v", err)
 			return
 		}
-
-		for _, w := range wordsInMessage {
-			if w == word {
-				wordIDs = append(wordIDs, wordID)
-			}
-		}
+		wordMap[word] = wordID
 	}
 
 	if err := rows.Err(); err != nil {
-		log.Println("error iterating rows: %w", err)
+		log.Printf("Error iterating rows: %v", err)
 		return
 	}
 
+	// Match words from the message to known words
+	for _, w := range wordsInMessage {
+		if id, ok := wordMap[w]; ok {
+			wordIDs = append(wordIDs, id)
+		}
+	}
+
 	if len(wordIDs) == 0 {
+		log.Println("No matching words found for message.")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	tx, err := dbpool.Begin(ctx)
+	if err != nil {
+		log.Printf("Error starting transaction: %v", err)
 		return
 	}
 
 	insertQuery := `INSERT INTO messages (UserID, Message, ServerID, wordID) VALUES ($1, $2, $3, $4);`
-	_, err = dbpool.Exec(context.Background(), insertQuery, m.Author.ID, m.Content, m.GuildID, wordIDs[0])
-	if err != nil {
-		log.Printf("Error inserting message into database: %v", err)
-		return
+	for _, wordID := range wordIDs {
+		if _, err := tx.Exec(ctx, insertQuery, m.Author.ID, m.Content, m.GuildID, wordID); err != nil {
+			log.Printf("Error inserting message into database: %v", err)
+			if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
+				log.Printf("Error rolling back transaction: %v", rollbackErr)
+			}
+			return
+		}
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("Error committing transaction: %v", err)
+		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
+			log.Printf("Error rolling back transaction: %v", rollbackErr)
+		}
+		return
+	}
+}
+
+func sendResponse(s *discordgo.Session, i *discordgo.InteractionCreate, response string) {
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: response,
+		},
+	})
+}
+
+func sendEmbedResponse(s *discordgo.Session, i *discordgo.InteractionCreate, embed *discordgo.MessageEmbed) {
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Embeds: []*discordgo.MessageEmbed{embed},
+		},
+	})
 }
 
 /**
@@ -403,23 +595,6 @@ CREATE TABLE messages (
     }
 
 
-
-
-	uuID for ID imellom ord og innlegg - defoult newid()
-
-
-	auto timestamp - defoult UNIX timestamp
-
-	 unixTimestamp := int64(1617183600) // You can replace this with any Unix timestamp
-
-    // Convert Unix timestamp to time.Time
-    tm := time.Unix(unixTimestamp, 0)
-
-    // Format time as string "YYYY-MM-DD HH:MM:SS"
-    formattedTime := tm.Format("2006-01-02 15:04:05")
-
-    // Print formatted time
-    fmt.Println("Formatted Time:", formattedTime)
-
+	må forandre på databasen slik at hvert entry i messages kan ha flere wordIDs tilknyttet seg. må nok forandre på all annen kode som henter ut ting av DBen
 
 */
