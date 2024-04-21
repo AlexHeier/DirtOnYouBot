@@ -236,7 +236,7 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 		}
 		defer rows.Close()
 
-		var scores []userScore // userScore defined in previous response
+		var scores []userScore
 
 		for rows.Next() {
 			var us userScore
@@ -272,16 +272,15 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			Timestamp:   time.Now().Format(time.RFC3339),
 		}
 
-		// Add special fields for the top three
 		for i, score := range scores[:3] {
 			icon := ""
 			switch i {
 			case 0:
-				icon = "🥇" // Gold medal emoji
+				icon = "🥇"
 			case 1:
-				icon = "🥈" // Silver medal emoji
+				icon = "🥈"
 			case 2:
-				icon = "🥉" // Bronze medal emoji
+				icon = "🥉"
 			}
 			field := &discordgo.MessageEmbedField{
 				Name:   fmt.Sprintf("%s %s", icon, score.Username),
@@ -291,7 +290,6 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			embed.Fields = append(embed.Fields, field)
 		}
 
-		// Add fields for the rest
 		if len(scores) > 3 {
 			embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
 				Name:   "More results",
@@ -458,13 +456,12 @@ func main() {
 }
 
 func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if m.Author.ID == s.State.User.ID { // Skip messages from the bot itself
+	if m.Author.ID == s.State.User.ID {
 		return
 	}
 
 	wordsInMessage := strings.Fields(strings.ToLower(m.Content))
 
-	// Fetch all words and their IDs from the database
 	wordsQuery := `SELECT wordID, word FROM words;`
 	rows, err := dbpool.Query(context.Background(), wordsQuery)
 	if err != nil {
@@ -474,7 +471,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	defer rows.Close()
 
 	wordIDs := []string{}
-	wordMap := make(map[string]string) // Map to store word to wordID mapping
+	wordMap := make(map[string]string)
 
 	for rows.Next() {
 		var (
@@ -494,7 +491,6 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
-	// Match words from the message to known words
 	for _, w := range wordsInMessage {
 		if id, ok := wordMap[w]; ok {
 			wordIDs = append(wordIDs, id)
