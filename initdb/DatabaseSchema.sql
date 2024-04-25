@@ -1,3 +1,5 @@
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
 CREATE TABLE IF NOT EXISTS public.messages (
     userid character varying(255) COLLATE pg_catalog."default",
     timestamp timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
