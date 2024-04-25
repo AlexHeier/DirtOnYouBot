@@ -116,6 +116,10 @@ var commands = []*discordgo.ApplicationCommand{
 		Name:        "commonwords",
 		Description: "shows which words has been used to most",
 	},
+	{
+		Name:        "deleteallmessages",
+		Description: "dropes the table messages",
+	},
 	// her kan neste komando være
 }
 
@@ -171,7 +175,7 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 
 		response = strings.Join(messages, "\n")
 		if response == "" {
-			response = "No messages found for the user."
+			response = fmt.Sprintf("%v is a boring bitch. Gaslight them to join the list ;D", user.Username)
 		}
 
 		if err := sendResponse(s, i, response); err != nil {
@@ -247,6 +251,14 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			return
 		}
 
+		if err != nil {
+			response := fmt.Sprintf("Failed to remove word: %v", err)
+			if err := sendResponse(s, i, response); err != nil {
+				log.Printf("Error sending detailed response: %v", err)
+			}
+			return
+		}
+
 		if commandTag.RowsAffected() == 0 {
 			response = fmt.Sprintf("Word '%s' does not exists in the database.", word)
 		} else {
@@ -275,6 +287,14 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			}
 			return
 		}
+
+		if !rows.Next() {
+			if err := sendResponse(s, i, "No words has been recorded yet! be the first :D"); err != nil {
+				log.Printf("Error sending no data response: %v", err)
+			}
+			return
+		}
+
 		defer rows.Close()
 
 		var scores []userScore
@@ -465,6 +485,38 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			}
 		}
 	},
+	"deleteallmessages": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		if err := acknowledgeInteraction(s, i); err != nil {
+			return
+		}
+
+		adminUserID := os.Getenv("ADMIN_ID")
+		response := "Skill issue"
+
+		if i.Member.User.ID != adminUserID {
+			if err := sendResponse(s, i, response); err != nil {
+				log.Printf("Error sending detailed response: %v", err)
+			}
+			return
+		}
+
+		query := `DELETE FROM messages;`
+		_, err := dbpool.Exec(context.Background(), query)
+
+		if err != nil {
+			response := fmt.Sprintf("Failed to remove word: %v", err)
+			if err := sendResponse(s, i, response); err != nil {
+				log.Printf("Error sending detailed response: %v", err)
+			}
+			return
+		}
+
+		response = "All data from messages has been deleted !!!"
+
+		if err := sendResponse(s, i, response); err != nil {
+			log.Printf("Error sending detailed response: %v", err)
+		}
+	},
 
 	// her kan neste commando være
 }
@@ -596,13 +648,39 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 }
 
 func sendResponse(s *discordgo.Session, i *discordgo.InteractionCreate, response string) error {
-	_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-		Content: response,
-	})
-	if err != nil {
-		log.Printf("Error sending follow-up message: %v", err)
+	// Define the maximum length for a single message
+	const maxMessageLength = 2000
+
+	// Check if the response exceeds the maximum length
+	if len(response) <= maxMessageLength {
+		// If the response fits within a single message, send it as is
+		_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+			Content: response,
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+		}
+		return err
 	}
-	return err
+
+	for k := 0; k < len(response); k += maxMessageLength {
+		end := k + maxMessageLength
+		if end > len(response) {
+			end = len(response)
+		}
+
+		chunk := response[k:end]
+
+		_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+			Content: chunk,
+		})
+		if err != nil {
+			log.Printf("Error sending follow-up message: %v", err)
+			return err
+		}
+	}
+
+	return nil
 }
 
 func sendEmbedResponse(s *discordgo.Session, i *discordgo.InteractionCreate, embed *discordgo.MessageEmbed) error {
