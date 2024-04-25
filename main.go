@@ -31,6 +31,7 @@ var GuildID = flag.String("guild", "", "Test guild ID. If not passed - bot regis
 var RemoveCommands = flag.Bool("rmcmd", true, "Remove all commands after shutdowning or not")
 var s *discordgo.Session
 var dbpool *pgxpool.Pool
+var adminUserID string = os.Getenv("ADMIN_ID")
 
 func init() { flag.Parse() }
 
@@ -188,8 +189,6 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 		if err := acknowledgeInteraction(s, i); err != nil {
 			return
 		}
-
-		adminUserID := os.Getenv("ADMIN_ID")
 		response := "Skill issue"
 
 		if i.Member.User.ID != adminUserID {
@@ -227,8 +226,6 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 		if err := acknowledgeInteraction(s, i); err != nil {
 			return
 		}
-
-		adminUserID := os.Getenv("ADMIN_ID")
 		response := "Skill issue"
 
 		if i.Member.User.ID != adminUserID {
@@ -490,7 +487,6 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			return
 		}
 
-		adminUserID := os.Getenv("ADMIN_ID")
 		response := "Skill issue"
 
 		if i.Member.User.ID != adminUserID {
