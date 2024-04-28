@@ -31,7 +31,7 @@ var GuildID = flag.String("guild", "", "Test guild ID. If not passed - bot regis
 var RemoveCommands = flag.Bool("rmcmd", true, "Remove all commands after shutdowning or not")
 var s *discordgo.Session
 var dbpool *pgxpool.Pool
-var adminUserID string = os.Getenv("ADMIN_ID")
+var wordMap map[string]string
 
 func init() { flag.Parse() }
 
@@ -66,6 +66,8 @@ func connectToDB() {
 		log.Fatalf("Unable to connect to database: %v\n", err)
 	}
 	fmt.Println("Connected to database.")
+
+	loadWordMap()
 }
 
 var commands = []*discordgo.ApplicationCommand{
@@ -119,7 +121,11 @@ var commands = []*discordgo.ApplicationCommand{
 	},
 	{
 		Name:        "deleteallmessages",
-		Description: "dropes the table messages",
+		Description: "dropes message table and restarts backtracking",
+	},
+	{
+		Name:        "help",
+		Description: "gives a small guide on how to use the bot",
 	},
 	// her kan neste komando være
 }
@@ -135,7 +141,7 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 		var response string
 
 		// Construct the query to fetch messages
-		query := `SELECT serverID, userID, message, timestamp FROM messages WHERE userID = $1;`
+		query := `SELECT serverID, userID, message, timestamp FROM messages WHERE userID = $1 ORDER BY timestamp ASC;`
 		rows, err := dbpool.Query(context.Background(), query, user.ID)
 		if err != nil {
 			response = fmt.Sprintf("Failed to query database: %v", err)
@@ -190,6 +196,7 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			return
 		}
 		response := "Skill issue"
+		adminUserID := os.Getenv("ADMIN_ID")
 
 		if i.Member.User.ID != adminUserID {
 			if err := sendResponse(s, i, response); err != nil {
@@ -217,6 +224,8 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			response = fmt.Sprintf("Word '%s' added successfully.", word)
 		}
 
+		loadWordMap()
+
 		if err := sendResponse(s, i, response); err != nil {
 			log.Printf("Error sending detailed response: %v", err)
 		}
@@ -227,6 +236,7 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			return
 		}
 		response := "Skill issue"
+		adminUserID := os.Getenv("ADMIN_ID")
 
 		if i.Member.User.ID != adminUserID {
 			if err := sendResponse(s, i, response); err != nil {
@@ -261,6 +271,8 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 		} else {
 			response = fmt.Sprintf("Word '%s' removed successfully.", word)
 		}
+
+		loadWordMap()
 
 		if err := sendResponse(s, i, response); err != nil {
 			log.Printf("Error sending detailed response: %v", err)
@@ -488,6 +500,7 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 		}
 
 		response := "Skill issue"
+		adminUserID := os.Getenv("ADMIN_ID")
 
 		if i.Member.User.ID != adminUserID {
 			if err := sendResponse(s, i, response); err != nil {
@@ -496,8 +509,7 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			return
 		}
 
-		query := `DELETE FROM messages;`
-		_, err := dbpool.Exec(context.Background(), query)
+		_, err := dbpool.Exec(context.Background(), `DELETE FROM messages;`)
 
 		if err != nil {
 			response := fmt.Sprintf("Failed to remove word: %v", err)
@@ -507,7 +519,48 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			return
 		}
 
+		_, err = dbpool.Exec(context.Background(), `DELETE FROM servers;`)
+
+		if err != nil {
+			response := fmt.Sprintf("Failed to remove servers: %v", err)
+			if err := sendResponse(s, i, response); err != nil {
+				log.Printf("Error sending detailed response: %v", err)
+			}
+			return
+		}
+
 		response = "All data from messages has been deleted !!!"
+
+		if err := sendResponse(s, i, response); err != nil {
+			log.Printf("Error sending detailed response: %v", err)
+		}
+	},
+	"help": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		if err := acknowledgeInteraction(s, i); err != nil {
+			return
+		}
+
+		response := `
+		# Welcome to **DirtOnYou**!
+		 
+		Ｃｏｍｍａｎｄｓ:
+		> **/unholy <user>**: This command will send all the _flagged_ messages of the given user, including information about when and where each message was sent.
+		
+		> **/scoreboard**: This command displays a scoreboard with the amount of _flagged_ messages all users have.
+		
+		> **/words**: This command will list all the _flagged_ words the bot monitors.
+		
+		> **/commonwords**: This command will show all words that have been used and the frequency of their usage.
+		
+		> **/help**: Responds with _this_ message.
+		 
+		Ａｄｍｉｎ Ｃｏｍｍａｎｄｓ:
+		> **/unholyadd <word>**: Adds a word to be _flagged_. Note: this will only affect new messages. To apply changes to old messages, use: _/deleteallmessages_.
+		
+		> **/unholyremove <word>**: Removes a word from the database and stops monitoring it. Previous messages logged with this word will not be deleted. To apply changes to old messages, use: _/deleteallmessages_.
+		
+		> **/deleteallmessages**: Deletes all messages in the database and starts backtracking the server. Note: this process is time-consuming due to Discord's limits, estimated at 5,600 messages per minute.
+		`
 
 		if err := sendResponse(s, i, response); err != nil {
 			log.Printf("Error sending detailed response: %v", err)
@@ -574,38 +627,32 @@ func main() {
 }
 
 func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if m.Author.ID == s.State.User.ID {
-		return
-	}
 
-	wordsInMessage := strings.Fields(strings.ToLower(m.Content))
-	wordsQuery := `SELECT wordID, word FROM words;`
-	rows, err := dbpool.Query(context.Background(), wordsQuery)
+	serverExists, err := checkServerExists(m.GuildID)
 	if err != nil {
-		log.Printf("Error querying the database: %v", err)
+		log.Printf("Error checking server existence: %v", err)
 		return
 	}
-	defer rows.Close()
+	if !serverExists {
+		go processAllMessages(s, m.GuildID)
+	} else {
+		processMessage(s, m.Message, m.GuildID)
+	}
+}
 
+func processMessage(s *discordgo.Session, msg *discordgo.Message, guildID string) {
+	if msg.Author.ID == s.State.User.ID {
+		return
+	}
+
+	if wordMap == nil {
+		return
+	}
+
+	msg.Content = strings.ReplaceAll(msg.Content, "@", "@\u200B")
+
+	wordsInMessage := strings.Fields(strings.ToLower(msg.Content))
 	var wordIDs []string
-	wordMap := make(map[string]string)
-
-	for rows.Next() {
-		var wordID string
-		var word string
-
-		if err := rows.Scan(&wordID, &word); err != nil {
-			log.Printf("Error scanning rows: %v", err)
-			return
-		}
-		wordMap[word] = wordID
-	}
-
-	if err := rows.Err(); err != nil {
-		log.Printf("Error iterating rows: %v", err)
-		return
-	}
-
 	for _, w := range wordsInMessage {
 		if id, ok := wordMap[w]; ok {
 			wordIDs = append(wordIDs, id)
@@ -616,6 +663,37 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
+	insertMessageIntoDB(msg, guildID, wordIDs)
+}
+
+func loadWordMap() {
+	newWordMap := make(map[string]string)
+	wordsQuery := `SELECT wordID, word FROM words;`
+	rows, err := dbpool.Query(context.Background(), wordsQuery)
+	if err != nil {
+		log.Printf("Error querying the database: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var wordID, word string
+		if err := rows.Scan(&wordID, &word); err != nil {
+			log.Printf("Error scanning rows: %v", err)
+			return
+		}
+		newWordMap[word] = wordID
+	}
+
+	if err := rows.Err(); err != nil {
+		log.Printf("Error iterating rows: %v", err)
+		return
+	}
+
+	wordMap = newWordMap
+}
+
+func insertMessageIntoDB(msg *discordgo.Message, guildID string, wordIDs []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -624,32 +702,95 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		log.Printf("Error starting transaction: %v", err)
 		return
 	}
+	defer tx.Rollback(ctx)
 
-	insertQuery := `INSERT INTO messages (UserID, Message, ServerID, wordID) VALUES ($1, $2, $3, $4);`
-	if _, err := tx.Exec(ctx, insertQuery, m.Author.ID, m.Content, m.GuildID, wordIDs); err != nil {
+	insertQuery := `INSERT INTO messages (UserID, Message, ServerID, wordID, timestamp) VALUES ($1, $2, $3, $4, $5);`
+	_, err = tx.Exec(ctx, insertQuery, msg.Author.ID, msg.Content, guildID, wordIDs, msg.Timestamp)
+	if err != nil {
 		log.Printf("Error inserting message into database: %v", err)
-		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
-			log.Printf("Error rolling back transaction: %v", rollbackErr)
-		}
 		return
 	}
 
-	if err := tx.Commit(ctx); err != nil {
+	if err = tx.Commit(ctx); err != nil {
 		log.Printf("Error committing transaction: %v", err)
-		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
-			log.Printf("Error rolling back transaction: %v", rollbackErr)
-		}
-		return
 	}
 }
 
+func checkServerExists(guildID string) (bool, error) {
+	var exists bool
+	query := `SELECT EXISTS(SELECT 1 FROM servers WHERE serverid=$1);`
+	err := dbpool.QueryRow(context.Background(), query, guildID).Scan(&exists)
+
+	if !exists {
+		insertQuery := `INSERT INTO servers (serverid) VALUES ($1);`
+		_, err = dbpool.Exec(context.Background(), insertQuery, guildID)
+		if err != nil {
+			return false, fmt.Errorf("error inserting new server: %v", err)
+		}
+	}
+
+	return exists, err
+}
+
+func processAllMessages(s *discordgo.Session, guildID string) {
+	m := ""
+	totalMessageAmount := 0
+	timeStart := time.Now()
+
+	guild, _ := s.Guild(guildID)
+	guildChannels, _ := s.GuildChannels(guildID)
+
+	m = fmt.Sprintf("I've started backtracking **%v**, i found **%v** channels", guild.Name, len(guildChannels))
+	sendAdminDM(m)
+
+	for _, channel := range guildChannels {
+		if channel.Type != discordgo.ChannelTypeGuildText {
+			continue
+		}
+
+		m = fmt.Sprintf("Started on **%v** in **%v**", channel.Name, guild.Name)
+		sendAdminDM(m)
+
+		lastID := ""
+		var allMessages int = 0
+
+		for {
+			messages, err := s.ChannelMessages(channel.ID, 100, lastID, "", "")
+			if err != nil {
+				log.Printf("Error fetching messages from channel %v: %v", channel.Name, err)
+				break
+			}
+			if len(messages) == 0 {
+				break
+			}
+
+			for _, msg := range messages {
+				processMessage(s, msg, guildID)
+			}
+
+			allMessages += len(messages)
+
+			lastID = messages[len(messages)-1].ID
+
+			if len(messages) < 100 {
+				break
+			}
+		}
+
+		m = fmt.Sprintf("Done with **%v** in **%v** found **%v** messages.", channel.Name, guild.Name, allMessages)
+		sendAdminDM(m)
+
+		totalMessageAmount = totalMessageAmount + allMessages
+	}
+
+	m = fmt.Sprintf("Server **%v** has been backtracked. It took %v. Found a total of **%v** messages", guild.Name, time.Since(timeStart), totalMessageAmount)
+	sendAdminDM(m)
+}
+
 func sendResponse(s *discordgo.Session, i *discordgo.InteractionCreate, response string) error {
-	// Define the maximum length for a single message
 	const maxMessageLength = 2000
 
-	// Check if the response exceeds the maximum length
 	if len(response) <= maxMessageLength {
-		// If the response fits within a single message, send it as is
 		_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 			Content: response,
 		})
@@ -699,27 +840,48 @@ func acknowledgeInteraction(s *discordgo.Session, i *discordgo.InteractionCreate
 	return err
 }
 
+func sendAdminDM(message string) {
+	adminUserID := os.Getenv("ADMIN_ID")
+
+	channel, err := s.UserChannelCreate(adminUserID)
+	if err != nil {
+		log.Printf("Error creating DM channel: %v", err)
+		return
+	}
+
+	_, err = s.ChannelMessageSend(channel.ID, message)
+	if err != nil {
+		log.Printf("Error sending DM: %v", err)
+		return
+	}
+}
+
 /**
 
-Database upset:
+Database Schema PostgreSQL:
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
-
-CREATE TABLE words (
-    wordID UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    word VARCHAR(255) UNIQUE
-);
-
-CREATE TABLE messages (
-    messageID UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    UserID varchar(255),
-    Timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    Message TEXT,
-    ServerID varchar(255),
-    wordIDs UUID[] DEFAULT ARRAY[]::UUID[],,
-    FOREIGN KEY (wordID) REFERENCES words(wordID) ON DELETE CASCADE
+CREATE TABLE IF NOT EXISTS public.messages (
+    userid character varying(255) COLLATE pg_catalog."default",
+    timestamp timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    message text COLLATE pg_catalog."default",
+    serverid character varying(255) COLLATE pg_catalog."default",
+    wordid uuid[]
 );
 
 
+CREATE TABLE IF NOT EXISTS public.words (
+    wordid uuid NOT NULL DEFAULT uuid_generate_v4(),
+    word character varying(255) COLLATE pg_catalog."default",
+    CONSTRAINT words_pkey PRIMARY KEY (wordid),
+    CONSTRAINT words_word_key UNIQUE (word)
+);
+
+CREATE TABLE IF NOT EXISTS public.servers (
+    serverid varchar(255)
+)
+
+ALTER TABLE IF EXISTS public.messages OWNER TO postgres;
+ALTER TABLE IF EXISTS public.words OWNER TO postgres;
 */
