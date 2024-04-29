@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/joho/godotenv"
 )
@@ -140,9 +141,24 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 		user := i.ApplicationCommandData().Options[0].UserValue(s)
 		var response string
 
-		// Construct the query to fetch messages
-		query := `SELECT serverID, userID, message, timestamp FROM messages WHERE userID = $1 ORDER BY timestamp ASC;`
-		rows, err := dbpool.Query(context.Background(), query, user.ID)
+		serverID := i.GuildID
+		mainServer := os.Getenv("MAIN_SERVER")
+
+		var query string
+		if serverID != mainServer {
+			query = `SELECT serverID, userID, message, timestamp FROM messages WHERE userID = $1 AND serverID = $2 ORDER BY timestamp ASC`
+		} else {
+			query = `SELECT serverID, userID, message, timestamp FROM messages WHERE userID = $1 ORDER BY timestamp ASC`
+		}
+
+		var err error
+		var rows pgx.Rows
+		if serverID != mainServer {
+			rows, err = dbpool.Query(context.Background(), query, user.ID, serverID)
+		} else {
+			rows, err = dbpool.Query(context.Background(), query, user.ID)
+		}
+
 		if err != nil {
 			response = fmt.Sprintf("Failed to query database: %v", err)
 			if err := sendResponse(s, i, response); err != nil {
@@ -287,8 +303,24 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		query := `SELECT UserID, COUNT(*) AS message_count FROM messages GROUP BY UserID ORDER BY message_count DESC;`
-		rows, err := dbpool.Query(ctx, query)
+		serverID := i.GuildID
+		mainServer := os.Getenv("MAIN_SERVER")
+
+		var query string
+		if serverID != mainServer {
+			query = `SELECT UserID, COUNT(*) AS message_count FROM messages WHERE serverID = $1 GROUP BY UserID ORDER BY message_count DESC;`
+		} else {
+			query = `SELECT UserID, COUNT(*) AS message_count FROM messages GROUP BY UserID ORDER BY message_count DESC;`
+		}
+
+		var err error
+		var rows pgx.Rows
+		if serverID != mainServer {
+			rows, err = dbpool.Query(ctx, query, serverID)
+		} else {
+			rows, err = dbpool.Query(ctx, query)
+		}
+
 		if err != nil {
 			log.Printf("Error executing scoreboard query: %v", err)
 			if err := sendResponse(s, i, "failed to fetch scoreboard"); err != nil {
@@ -344,7 +376,10 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 			Timestamp:   time.Now().Format(time.RFC3339),
 		}
 
-		for i, score := range scores[:3] {
+		for i, score := range scores {
+			if i >= 3 {
+				break
+			}
 			icon := ""
 			switch i {
 			case 0:
@@ -436,25 +471,30 @@ var commandHandlers = map[string]func(s *discordgo.Session, i *discordgo.Interac
 	"commonwords": func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 		if err := acknowledgeInteraction(s, i); err != nil {
-			return // Stop if we can't even acknowledge the interaction
+			return
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		// SQL query to count each word's occurrences and order by count
-		// Adjusted to unnest the wordIDs array
-		query := `
-        SELECT w.word, COUNT(*) AS usage_count
-        FROM words w
-        JOIN (
-            SELECT UNNEST(wordID) AS wordID
-            FROM messages
-        ) m ON w.wordID = m.wordID
-        GROUP BY w.word
-        ORDER BY usage_count DESC;
-    `
-		rows, err := dbpool.Query(ctx, query)
+		serverID := i.GuildID
+		mainServer := os.Getenv("MAIN_SERVER")
+
+		var query string
+		if serverID != mainServer {
+			query = `SELECT w.word, COUNT(*) AS usage_count FROM words w JOIN (SELECT UNNEST(wordID) AS wordID FROM messages WHERE serverID = $1) m ON w.wordID = m.wordID GROUP BY w.word ORDER BY usage_count DESC;`
+		} else {
+			query = `SELECT w.word, COUNT(*) AS usage_count FROM words w JOIN (SELECT UNNEST(wordID) AS wordID FROM messages) m ON w.wordID = m.wordID GROUP BY w.word ORDER BY usage_count DESC;`
+		}
+
+		var err error
+		var rows pgx.Rows
+		if serverID != mainServer {
+			rows, err = dbpool.Query(ctx, query, serverID)
+		} else {
+			rows, err = dbpool.Query(ctx, query)
+		}
+
 		if err != nil {
 			log.Printf("Error executing commonwords query: %v", err)
 			if err := sendResponse(s, i, "Failed to fetch common words"); err != nil {
@@ -649,13 +689,13 @@ func processMessage(s *discordgo.Session, msg *discordgo.Message, guildID string
 		return
 	}
 
-	msg.Content = strings.ReplaceAll(msg.Content, "@", "@\u200B")
-
 	wordsInMessage := strings.Fields(strings.ToLower(msg.Content))
 	var wordIDs []string
-	for _, w := range wordsInMessage {
-		if id, ok := wordMap[w]; ok {
-			wordIDs = append(wordIDs, id)
+	for _, word := range wordsInMessage {
+		for key, id := range wordMap {
+			if strings.Contains(word, key) {
+				wordIDs = append(wordIDs, id)
+			}
 		}
 	}
 
@@ -704,6 +744,8 @@ func insertMessageIntoDB(msg *discordgo.Message, guildID string, wordIDs []strin
 	}
 	defer tx.Rollback(ctx)
 
+	msg.Content = strings.ReplaceAll(msg.Content, "@", "@\u200B")
+
 	insertQuery := `INSERT INTO messages (UserID, Message, ServerID, wordID, timestamp) VALUES ($1, $2, $3, $4, $5);`
 	_, err = tx.Exec(ctx, insertQuery, msg.Author.ID, msg.Content, guildID, wordIDs, msg.Timestamp)
 	if err != nil {
@@ -737,8 +779,14 @@ func processAllMessages(s *discordgo.Session, guildID string) {
 	totalMessageAmount := 0
 	timeStart := time.Now()
 
-	guild, _ := s.Guild(guildID)
-	guildChannels, _ := s.GuildChannels(guildID)
+	guild, err := s.Guild(guildID)
+	if err != nil {
+		return
+	}
+	guildChannels, err := s.GuildChannels(guildID)
+	if err != nil {
+		return
+	}
 
 	m = fmt.Sprintf("I've started backtracking **%v**, i found **%v** channels", guild.Name, len(guildChannels))
 	sendAdminDM(m)
